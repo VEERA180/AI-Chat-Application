@@ -2,116 +2,102 @@
 # upload.py
 # ------------------------------------------------------------
 # Responsibility:
-#   - Handle document upload API request
-#   - Validate uploaded file
-#   - Validate file size
-#   - Save the uploaded PDF
-#   - Extract text from the PDF
-#   - Clean the extracted text
-#   - Send the cleaned text to the chunking service
+#   1. Receive a PDF file from the user
+#   2. Validate the file type
+#   3. Validate the file size
+#   4. Save the PDF locally
+#   5. Extract text from the PDF
+#   6. Clean the extracted text
+#   7. Create text chunks
+#   8. Generate an embedding vector for every chunk
+#   9. Return processing information
+#
+# Architecture:
+#
+#   React Frontend
+#        ↓
+#   FastAPI /upload
+#        ↓
+#   Validate PDF
+#        ↓
+#   Save PDF
+#        ↓
+#   Extract Text
+#        ↓
+#   Clean Text
+#        ↓
+#   Chunk Text
+#        ↓
+#   Azure OpenAI Embeddings
+#        ↓
+#   Embedding Vectors
 #
 # Note:
-#   Chunking logic is kept separately inside:
-#       app/services/chunking.py
-#
-# This follows the Separation of Concerns principle.
+#   Currently embeddings are only generated in memory.
+#   We will store them in a vector database in a later step.
 # ============================================================
 
 
 # ------------------------------------------------------------
-# FastAPI imports
+# Imports
 # ------------------------------------------------------------
-# APIRouter:
-#   Used to create a separate group of API endpoints.
-#
-# UploadFile:
-#   Represents the uploaded file received from the client.
-#
-# File:
-#   Tells FastAPI that the parameter should be received
-#   as a multipart/form-data file.
-# ------------------------------------------------------------
-from fastapi import APIRouter, UploadFile, File
 
-
-# ------------------------------------------------------------
-# Path import
-# ------------------------------------------------------------
-# Path provides a clean and platform-independent way to
-# work with file and directory paths.
-# ------------------------------------------------------------
 from pathlib import Path
 
-
-# ------------------------------------------------------------
-# PDF reader
-# ------------------------------------------------------------
-# PdfReader is used to extract text from PDF documents.
-# ------------------------------------------------------------
+from fastapi import APIRouter, UploadFile, File
 from pypdf import PdfReader
 
-
-# ------------------------------------------------------------
 # Chunking service
-# ------------------------------------------------------------
-# Import the chunking function from our service layer.
-#
-# This keeps chunking logic outside the API layer.
-# ------------------------------------------------------------
 from app.services.chunking import create_chunks
 
+# Embedding service
+from app.services.embedding import create_embedding
+
 
 # ------------------------------------------------------------
-# Create API router
+# Create API Router
 # ------------------------------------------------------------
-# This router will be registered in main.py.
-# ------------------------------------------------------------
+
 router = APIRouter()
 
 
-# ============================================================
-# Upload Configuration
-# ============================================================
-
-
 # ------------------------------------------------------------
-# Directory where uploaded documents will be stored.
+# Upload directory
+# ------------------------------------------------------------
+# Uploaded PDF files will be stored inside the "uploads"
+# directory.
 #
-# Path("uploads") creates the uploads directory relative
-# to the application's current working directory.
+# exist_ok=True means:
+#   - Create the directory if it doesn't exist.
+#   - Do nothing if it already exists.
 # ------------------------------------------------------------
+
 UPLOAD_DIR = Path("uploads")
 
-
-# ------------------------------------------------------------
-# Create the uploads directory if it does not already exist.
-#
-# exist_ok=True prevents an error if the directory already
-# exists.
-# ------------------------------------------------------------
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 
 # ------------------------------------------------------------
-# Allowed document extensions.
-#
-# Currently our RAG application supports PDF files only.
+# File validation configuration
 # ------------------------------------------------------------
+
+# Only PDF files are currently supported.
 ALLOWED_EXTENSIONS = {".pdf"}
 
 
-# ------------------------------------------------------------
-# Maximum allowed file size.
+# Maximum allowed file size:
+# 10 MB
 #
-# 10 * 1024 * 1024 bytes = 10 MB
+# Calculation:
+# 10 × 1024 × 1024 bytes
 # ------------------------------------------------------------
+
 MAX_FILE_SIZE = 10 * 1024 * 1024
 
 
 # ============================================================
-# Upload API
+# Upload Document API
 # ============================================================
-
 
 @router.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
@@ -134,29 +120,29 @@ async def upload_document(file: UploadFile = File(...)):
             ↓
         Create chunks
             ↓
+        Generate embeddings
+            ↓
         Return processing information
     """
 
     # --------------------------------------------------------
     # Step 1: Validate file extension
     # --------------------------------------------------------
-    # Extract the extension from the uploaded filename.
-    #
     # Example:
-    #   "document.pdf" → ".pdf"
+    #
+    # "sample.pdf" → ".pdf"
     #
     # lower() ensures that:
-    #   .PDF
-    #   .Pdf
-    #   .pdf
+    #
+    # ".PDF"
+    # ".Pdf"
+    # ".pdf"
     #
     # are treated the same way.
     # --------------------------------------------------------
+
     extension = Path(file.filename).suffix.lower()
 
-    # --------------------------------------------------------
-    # Check whether the uploaded file is a supported type.
-    # --------------------------------------------------------
     if extension not in ALLOWED_EXTENSIONS:
         return {
             "message": "Only PDF files are allowed"
@@ -166,27 +152,28 @@ async def upload_document(file: UploadFile = File(...)):
     # --------------------------------------------------------
     # Step 2: Validate file size
     # --------------------------------------------------------
-    # We read the uploaded file in 1 MB chunks instead of
-    # loading the complete file into memory at once.
     #
-    # This is better for memory usage, especially when
-    # processing larger files.
+    # We read the uploaded file in 1 MB pieces instead of
+    # loading the entire file into memory at once.
+    #
+    # This is better for memory usage.
     # --------------------------------------------------------
+
     file_size = 0
 
     while True:
 
-        # Read up to 1 MB from the uploaded file.
+        # Read up to 1 MB at a time
         chunk = await file.read(1024 * 1024)
 
-        # If no data is returned, we reached the end of file.
+        # No more data
         if not chunk:
             break
 
-        # Add the number of bytes read to the total size.
+        # Add the number of bytes read
         file_size += len(chunk)
 
-        # Stop processing if the file exceeds the limit.
+        # Stop if file exceeds 10 MB
         if file_size > MAX_FILE_SIZE:
             return {
                 "message": "File size must be less than 10 MB"
@@ -196,126 +183,164 @@ async def upload_document(file: UploadFile = File(...)):
     # --------------------------------------------------------
     # Step 3: Reset file position
     # --------------------------------------------------------
-    # The previous step read the complete file.
+    #
+    # We already read the file while checking its size.
     #
     # seek(0) moves the file pointer back to the beginning
-    # so that we can read the file again while saving it.
+    # so we can read the file again when saving it.
     # --------------------------------------------------------
+
     await file.seek(0)
 
 
     # --------------------------------------------------------
-    # Step 4: Create the destination file path
+    # Step 4: Create file path
     # --------------------------------------------------------
     #
     # Example:
     #
-    #   uploads/
-    #       Veera_RPA_Senior_Lead.pdf
-    #
+    # uploads/Veera_RPA_Senior_Lead.pdf
     # --------------------------------------------------------
+
     file_path = UPLOAD_DIR / file.filename
 
 
     # --------------------------------------------------------
-    # Step 5: Save the uploaded PDF
+    # Step 5: Save uploaded PDF
     # --------------------------------------------------------
-    # "wb" means:
-    #
-    #   w → write mode
-    #   b → binary mode
-    #
-    # PDF files must be handled as binary data.
-    # --------------------------------------------------------
+
     with open(file_path, "wb") as buffer:
 
-        # Read the uploaded file and write it to disk.
+        # Read the uploaded file and write it to disk
         buffer.write(await file.read())
 
 
-    # ========================================================
-    # Step 6: Extract text from PDF
-    # ========================================================
+    # --------------------------------------------------------
+    # Step 6: Read PDF
+    # --------------------------------------------------------
+    #
+    # PdfReader reads the saved PDF file so that we can
+    # extract text from its pages.
+    # --------------------------------------------------------
 
-    # --------------------------------------------------------
-    # Create a PdfReader instance for the saved PDF.
-    # --------------------------------------------------------
     reader = PdfReader(file_path)
 
 
     # --------------------------------------------------------
-    # Variable used to store all extracted text.
+    # Step 7: Extract text
     # --------------------------------------------------------
+    #
+    # Start with an empty string.
+    # We will append text from every PDF page.
+    # --------------------------------------------------------
+
     text = ""
 
 
-    # --------------------------------------------------------
-    # Extract text from every page.
-    # --------------------------------------------------------
+    # Loop through every page in the PDF
     for page in reader.pages:
 
-        # ----------------------------------------------------
-        # extract_text() may return None for pages that do not
-        # contain extractable text.
+        # extract_text() can sometimes return None.
         #
         # "or ''" ensures that we always append a string.
-        # ----------------------------------------------------
         text += page.extract_text() or ""
 
 
-    # ========================================================
-    # Step 7: Clean extracted text
-    # ========================================================
+    # --------------------------------------------------------
+    # Step 8: Clean extracted text
+    # --------------------------------------------------------
+    #
+    # strip():
+    #   Removes leading and trailing whitespace.
+    #
+    # split():
+    #   Splits text based on whitespace.
+    #
+    # " ".join():
+    #   Combines the words using a single space.
+    #
+    # This removes unnecessary newlines and repeated spaces.
+    # --------------------------------------------------------
 
-    # --------------------------------------------------------
-    # Remove leading and trailing whitespace.
-    # --------------------------------------------------------
     text = text.strip()
 
-
-    # --------------------------------------------------------
-    # Normalize whitespace.
-    #
-    # Multiple spaces, tabs and newlines are converted into
-    # a single space.
-    #
-    # Example:
-    #
-    #   "Hello     World\n\nRAG"
-    #
-    # becomes:
-    #
-    #   "Hello World RAG"
-    # --------------------------------------------------------
     text = " ".join(text.split())
 
 
-    # ========================================================
-    # Step 8: Create document chunks
-    # ========================================================
+    # --------------------------------------------------------
+    # Step 9: Create text chunks
+    # --------------------------------------------------------
+    #
+    # The chunking service divides the large document text
+    # into smaller pieces.
+    #
+    # Example:
+    #
+    # Document
+    #    ↓
+    # Chunk 1
+    # Chunk 2
+    # Chunk 3
+    # ...
+    # --------------------------------------------------------
 
-    # --------------------------------------------------------
-    # Send the cleaned text to the chunking service.
-    #
-    # The actual chunking logic is NOT inside upload.py.
-    #
-    # It is maintained inside:
-    #
-    #   app/services/chunking.py
-    #
-    # This makes the application easier to maintain and test.
-    # --------------------------------------------------------
     chunks = create_chunks(text)
 
 
-    # ========================================================
-    # Step 9: Return processing result
-    # ========================================================
+    # --------------------------------------------------------
+    # Step 10: Generate embeddings
+    # --------------------------------------------------------
+    #
+    # Every chunk is sent to Azure OpenAI.
+    #
+    # Example:
+    #
+    # Chunk 1 → Embedding Vector 1
+    # Chunk 2 → Embedding Vector 2
+    # Chunk 3 → Embedding Vector 3
+    #
+    # Each vector currently contains 1536 numbers because
+    # we are using text-embedding-3-small with the current
+    # configuration.
+    # --------------------------------------------------------
+
+    embeddings = []
+
+    for chunk in chunks:
+
+        # Generate embedding for the current chunk
+        embedding = create_embedding(chunk)
+
+        # Store the embedding vector in our list
+        embeddings.append(embedding)
+
+
+    # --------------------------------------------------------
+    # Step 11: Return processing information
+    # --------------------------------------------------------
+    #
+    # IMPORTANT:
+    # We are returning the embeddings temporarily for testing.
+    #
+    # In the final architecture, we should NOT return all
+    # embedding vectors to the frontend.
+    #
+    # Instead:
+    #
+    # Chunk + Embedding
+    #        ↓
+    # Vector Database
+    #
+    # We will implement that later.
+    # --------------------------------------------------------
 
     return {
-        "message": "Document uploaded successfully",
+        "message": "Document uploaded and embeddings generated successfully",
         "filename": file.filename,
         "text_length": len(text),
         "chunk_count": len(chunks),
-        "chunks": chunks
+        "embedding_count": len(embeddings),
+        "embedding_dimensions": len(embeddings[0]) if embeddings else 0,
+        "chunks": chunks,
+        "embeddings": embeddings
     }
